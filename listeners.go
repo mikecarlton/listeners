@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [PORT_NUMBER | USERNAME | ^PID]\n"
+	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [PORT_NUMBER | USERNAME | @PID]\n"
 	UDPv4 = "/proc/net/udp"
 	UDPv6 = "/proc/net/udp6"
 	TCPv4 = "/proc/net/tcp"
@@ -136,6 +136,10 @@ func processName(pid int, extended bool) string {
 		return ""
 	}
 	words := strings.Split(string(data), "\000")
+	numWords := len(words)
+	if numWords > 0 && len(words[numWords-1]) == 0 {
+		words = words[:numWords-1]
+	}
 	if extended {
 		return strings.Join(words, " ")
 	}
@@ -187,8 +191,8 @@ func main() {
 
 	socketRE := regexp.MustCompile(`socket:\[(\d+)\]`)
 	procRE := regexp.MustCompile(`^/proc/(\d+)/`)
-	userRE := regexp.MustCompile(`/^[a-z][-a-z]*$/`)
-	pidRE := regexp.MustCompile(`/^\^\d+$/`)
+	userRE := regexp.MustCompile(`^[a-z][-a-z]*$`)
+	pidRE := regexp.MustCompile(`^@\d+$`)
 
 	// Command-line argument parsing
 	for i := 1; i < len(os.Args); i++ {
@@ -224,12 +228,12 @@ func main() {
 			fmt.Println("  Exits with status 0 (success) if any listeners are found, else exits with status 1")
 			os.Exit(0)
 		default:
-			if port, err := strconv.Atoi(os.Args[i]); err == nil {
-				singlePort = port
+			if pidRE.MatchString(os.Args[i]) {
+				singlePID = mustAtoi(os.Args[i][1:])
 			} else if userRE.MatchString(os.Args[i]) {
 				singleUser = os.Args[i]
-			} else if pidRE.MatchString(os.Args[i]) {
-				singlePID = mustAtoi(os.Args[i][1:])
+			} else if port, err := strconv.Atoi(os.Args[i]); err == nil {
+				singlePort = port
 			} else {
 				fmt.Fprintf(os.Stderr, USAGE, os.Args[0])
 				os.Exit(1)
@@ -350,16 +354,16 @@ func main() {
 				}
 			}
 
-			// right justify certain columns
+			// left-justify certain columns
 			widths[1] *= -1
 			widths[2] *= -1
-			if isRoot() {
-				widths[4] *= -1
-			}
 
 			for _, line := range lines {
 				spacer := ""
 				for i, width := range widths {
+					if i == len(widths)-1 { // last column does not need width
+						width = 0
+					}
 					fmt.Printf("%s%*s", spacer, width, line[i])
 					spacer = " "
 				}
