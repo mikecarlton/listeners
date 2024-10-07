@@ -28,7 +28,7 @@ const (
 type PortNumber int
 type OwnerId int // PID or UID
 
-type Family struct {
+type Protocol struct {
 	Files       []string
 	ListenState string
 	Enabled     bool
@@ -48,7 +48,7 @@ type OwnerInfo struct {
 }
 
 type Listener struct {
-	Family    string   `json:"family"`
+	Protocol  string   `json:"protocol"`
 	Port      int      `json:"port"`
 	Addresses []string `json:"addresses"`
 	User      string   `json:"user"`
@@ -165,10 +165,10 @@ func exists(path string) bool {
 	return err == nil
 }
 
-func SetField(families map[string]*Family, name string, field string, value interface{}) {
-	family, ok := families[name]
+func SetField(protocols map[string]*Protocol, name string, field string, value interface{}) {
+	protocol, ok := protocols[name]
 	if !ok {
-		panic(fmt.Sprintf("family %s not found", name))
+		panic(fmt.Sprintf("protocol %s not found", name))
 	}
 
 	switch field {
@@ -177,22 +177,22 @@ func SetField(families map[string]*Family, name string, field string, value inte
 		if !ok {
 			panic(fmt.Sprintf("invalid value for Files: %v", value))
 		}
-		family.Files = files
+		protocol.Files = files
 	case "Enabled":
 		enabled, ok := value.(bool)
 		if !ok {
 			panic(fmt.Sprintf("invalid value for Enabled: %v", value))
 		}
-		family.Enabled = enabled
+		protocol.Enabled = enabled
 	default:
 		panic(fmt.Sprintf("unknown field: %s", field))
 	}
 
-	families[name] = family
+	protocols[name] = protocol
 }
 
 func main() {
-	families := map[string]*Family{
+	protocols := map[string]*Protocol{
 		"udp": {Files: []string{UDPv4, UDPv6}, ListenState: "07", Enabled: true},
 		"tcp": {Files: []string{TCPv4, TCPv6}, ListenState: "0A", Enabled: true},
 	}
@@ -212,19 +212,19 @@ func main() {
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-4":
-			SetField(families, "tcp", "Files", []string{TCPv4})
-			SetField(families, "udp", "Files", []string{UDPv4})
+			SetField(protocols, "tcp", "Files", []string{TCPv4})
+			SetField(protocols, "udp", "Files", []string{UDPv4})
 		case "-6":
-			SetField(families, "tcp", "Files", []string{TCPv6})
-			SetField(families, "udp", "Files", []string{UDPv6})
+			SetField(protocols, "tcp", "Files", []string{TCPv6})
+			SetField(protocols, "udp", "Files", []string{UDPv6})
 		case "-j":
 			jsonOutput = true
 		case "-t":
-			SetField(families, "tcp", "Enabled", true)
-			SetField(families, "udp", "Enabled", false)
+			SetField(protocols, "tcp", "Enabled", true)
+			SetField(protocols, "udp", "Enabled", false)
 		case "-u":
-			SetField(families, "udp", "Enabled", true)
-			SetField(families, "tcp", "Enabled", false)
+			SetField(protocols, "udp", "Enabled", true)
+			SetField(protocols, "tcp", "Enabled", false)
 		case "-q":
 			quiet = true
 		case "-x":
@@ -283,13 +283,13 @@ func main() {
 
 	exitCode := 1
 	for _, name := range []string{"udp", "tcp"} {
-		family := families[name]
-		if !family.Enabled {
+		protocol := protocols[name]
+		if !protocol.Enabled {
 			continue
 		}
 
 		inputLines := []string{}
-		for _, file := range family.Files {
+		for _, file := range protocol.Files {
 			data, err := os.ReadFile(file)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Unable to read socket file '%s': %v\n", file, err)
@@ -304,7 +304,7 @@ func main() {
 		// collect listening sockets
 		sockets := map[PortNumber][]Socket{}
 		for _, line := range inputLines {
-			collect(line, sockets, family.ListenState)
+			collect(line, sockets, protocol.ListenState)
 		}
 
 		keys := make([]PortNumber, 0, len(sockets))
@@ -366,7 +366,7 @@ func main() {
 
 			for ownerId, owner := range owners {
 				listener := Listener{
-					Family:    name,
+					Protocol:  name,
 					Port:      int(port),
 					Addresses: owner.Addresses,
 					User:      owner.User,
@@ -375,11 +375,11 @@ func main() {
 					listener.PID = int(ownerId)
 					listener.Cmd = owner.Cmd
 				}
-				family.Listeners = append(family.Listeners, listener)
+				protocol.Listeners = append(protocol.Listeners, listener)
 			}
 		}
 
-		if len(family.Listeners) > 0 {
+		if len(protocol.Listeners) > 0 {
 			exitCode = 0
 		}
 	}
@@ -393,7 +393,7 @@ func main() {
 		fmt.Printf("[")
 		separator := ""
 		for _, name := range []string{"udp", "tcp"} {
-			listeners := families[name].Listeners
+			listeners := protocols[name].Listeners
 			for _, listener := range listeners {
 				json, err := json.Marshal(listener)
 				if err != nil {
@@ -413,7 +413,7 @@ func main() {
 			}
 			lines := [][]string{header}
 
-			for _, listener := range families[name].Listeners {
+			for _, listener := range protocols[name].Listeners {
 				line := []string{fmt.Sprintf("%d", listener.Port), strings.Join(listener.Addresses, ", "), listener.User}
 				if isRoot() {
 					line = append(line, fmt.Sprintf("%d", listener.PID), strings.Join(listener.Cmd, ""))
