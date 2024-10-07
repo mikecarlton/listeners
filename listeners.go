@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -17,72 +18,85 @@ import (
 )
 
 const (
-	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [PORT_NUMBER | USERNAME | @PID]\n"
+	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [-j] [PORT_NUMBER | USERNAME | @PID]\n"
 	UDPv4 = "/proc/net/udp"
 	UDPv6 = "/proc/net/udp6"
 	TCPv4 = "/proc/net/tcp"
 	TCPv6 = "/proc/net/tcp6"
 )
 
+type PortNumber int
+type OwnerId int // PID or UID
+
 type Family struct {
-	Files       []string `json:"files"`
-	ListenState string   `json:"listen_state"`
-	Enabled     bool     `json:"enabled"`
+	Files       []string
+	ListenState string
+	Enabled     bool
+	Listeners   []Listener // flattened list of listening sockets
+}
+
+type Socket struct {
+	Address string
+	UID     int
+	Inode   int
+}
+
+type OwnerInfo struct {
+	User      string
+	Cmd       []string
+	Addresses []string
 }
 
 type Listener struct {
-	Address string `json:"address"`
-	UID     int    `json:"uid"`
-	Inode   int    `json:"inode"`
-}
-
-type ProcessInfo struct {
-	User      string   `json:"user"`
-	Cmd       string   `json:"cmd"`
+	Family    string   `json:"family"`
+	Port      int      `json:"port"`
 	Addresses []string `json:"addresses"`
+	User      string   `json:"user"`
+	PID       int      `json:"pid,omitempty"`
+	Cmd       []string `json:"command,omitempty"`
 }
 
 // adds entry to listeners if the socket is in listening state
 // https://www.kernel.org/doc/html/v5.8/networking/proc_net_tcp.html
-func collect(entry string, listeners map[int][]Listener, listenState string) {
+func collect(entry string, listeners map[PortNumber][]Socket, listenState string) {
 	fields := strings.Fields(entry)
 	localAddress := fields[1]
-	st := fields[3]
+	state := fields[3]
 	uid := fields[7]
 	inode := fields[9]
 
-	if st == listenState {
+	if state == listenState {
 		address, portStr, found := strings.Cut(localAddress, ":")
 		if !found {
 			panic(fmt.Sprintf("invalid localAddress: %s", localAddress))
 		}
 
-		var port int
+		var port PortNumber
 		_, err := fmt.Sscanf(portStr, "%x", &port)
 		if err != nil {
 			panic(fmt.Sprintf("invalid port: %d", port))
 		}
 
-		listeners[port] = append(listeners[port], Listener{
-			Address: unpackIP(address, len(address)/8),
+		listeners[port] = append(listeners[port], Socket{
+			Address: unpackIP(address),
 			UID:     mustAtoi(uid),
 			Inode:   mustAtoi(inode),
 		})
 	}
 }
 
-func unpackIP(data string, words int) string {
+func unpackIP(data string) string {
 	var ip net.IP
 
-	switch words {
-	case 1:
+	switch len(data) {
+	case 8:
 		bytes := [4]byte{}
 		_, err := fmt.Sscanf(data, "%2x%2x%2x%2x", &bytes[3], &bytes[2], &bytes[1], &bytes[0])
 		if err != nil {
 			panic(fmt.Sprintf("unable to scan hex IPv4 '%s'", data))
 		}
 		ip = net.IPv4(bytes[0], bytes[1], bytes[2], bytes[3])
-	case 4:
+	case 32:
 		bytes := [16]byte{}
 		_, err := fmt.Sscanf(data, "%2x%2x%2x%2x%2x%2x%2x%2x%2x%2x%2x%2x%2x%2x%2x%2x",
 			&bytes[3], &bytes[2], &bytes[1], &bytes[0],
@@ -95,7 +109,7 @@ func unpackIP(data string, words int) string {
 		}
 		ip = net.IP(bytes[:])
 	default:
-		panic(fmt.Sprintf("invalid words count: %d", words))
+		panic(fmt.Sprintf("invalid data length: %d", len(data)))
 	}
 
 	return ip.String()
@@ -123,27 +137,27 @@ func isRoot() bool {
 }
 
 // return process name for process id
-func processName(pid int, extended bool) string {
+func processName(pid int, extended bool) []string {
 	if pid < 0 {
-		return ""
+		return []string{}
 	}
 	path := fmt.Sprintf("/proc/%d/cmdline", pid)
 	if !exists(path) {
-		return ""
+		return []string{}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return []string{}
 	}
 	words := strings.Split(string(data), "\000")
 	numWords := len(words)
 	if numWords > 0 && len(words[numWords-1]) == 0 {
 		words = words[:numWords-1]
 	}
-	if extended {
-		return strings.Join(words, " ")
+	if !extended {
+		words = words[:1]
 	}
-	return words[0]
+	return words
 }
 
 func exists(path string) bool {
@@ -151,7 +165,7 @@ func exists(path string) bool {
 	return err == nil
 }
 
-func SetField(families map[string]Family, name string, field string, value interface{}) {
+func SetField(families map[string]*Family, name string, field string, value interface{}) {
 	family, ok := families[name]
 	if !ok {
 		panic(fmt.Sprintf("family %s not found", name))
@@ -178,7 +192,7 @@ func SetField(families map[string]Family, name string, field string, value inter
 }
 
 func main() {
-	families := map[string]Family{
+	families := map[string]*Family{
 		"udp": {Files: []string{UDPv4, UDPv6}, ListenState: "07", Enabled: true},
 		"tcp": {Files: []string{TCPv4, TCPv6}, ListenState: "0A", Enabled: true},
 	}
@@ -188,13 +202,13 @@ func main() {
 	singlePID := -1
 	quiet := false
 	extended := false
+	jsonOutput := false
 
 	socketRE := regexp.MustCompile(`socket:\[(\d+)\]`)
 	procRE := regexp.MustCompile(`^/proc/(\d+)/`)
 	userRE := regexp.MustCompile(`^[a-z][-a-z]*$`)
 	pidRE := regexp.MustCompile(`^@\d+$`)
 
-	// Command-line argument parsing
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-4":
@@ -203,6 +217,8 @@ func main() {
 		case "-6":
 			SetField(families, "tcp", "Files", []string{TCPv6})
 			SetField(families, "udp", "Files", []string{UDPv6})
+		case "-j":
+			jsonOutput = true
 		case "-t":
 			SetField(families, "tcp", "Enabled", true)
 			SetField(families, "udp", "Enabled", false)
@@ -221,6 +237,7 @@ func main() {
 			fmt.Println("    -t: show only TCP listeners")
 			fmt.Println("    -q: no output, exit status only")
 			fmt.Println("    -x: show extended process info (requires root access)")
+			fmt.Println("    -j: JSON output")
 			fmt.Println("    -h: show this help")
 			fmt.Println("    PORT_NUMBER: show only listeners for PORT")
 			fmt.Println("    USERNAME: show only processes owned by USERNAME")
@@ -247,7 +264,7 @@ func main() {
 	}
 
 	// map inodes to pids by scanning /proc/*/fd (requires root)
-	inodeToPid := map[int]int{}
+	inodeToPid := map[int]OwnerId{}
 	if isRoot() {
 		paths, _ := filepath.Glob("/proc/[0-9]*/fd/*")
 		for _, path := range paths {
@@ -257,21 +274,20 @@ func main() {
 					inode := mustAtoi(targetMatches[1])
 					procMatches := procRE.FindStringSubmatch(path)
 					if procMatches != nil {
-						inodeToPid[inode] = mustAtoi(procMatches[1])
+						inodeToPid[inode] = OwnerId(mustAtoi(procMatches[1]))
 					}
 				}
 			}
 		}
 	}
 
-	matchResult := 1 // exit 1 if no matches
-	stanza := 0
-	for name, family := range families {
+	exitCode := 1
+	for _, name := range []string{"udp", "tcp"} {
+		family := families[name]
 		if !family.Enabled {
 			continue
 		}
 
-		listeners := map[int][]Listener{}
 		inputLines := []string{}
 		for _, file := range family.Files {
 			data, err := os.ReadFile(file)
@@ -281,70 +297,139 @@ func main() {
 			}
 
 			// skip the header line
-			dataLines := strings.Split(string(data), "\n")
+			dataLines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 			inputLines = append(inputLines, dataLines[1:]...)
 		}
 
-		// collect listeners
+		// collect listening sockets
+		sockets := map[PortNumber][]Socket{}
 		for _, line := range inputLines {
-			if len(line) > 0 {
-				collect(line, listeners, family.ListenState)
-			}
+			collect(line, sockets, family.ListenState)
 		}
 
-		// format output
-		header := []string{strings.ToUpper(name), "ADDR", "USER"}
-		if isRoot() {
-			header = append(header, "PID", "CMD")
-		}
-		lines := [][]string{header}
-
-		keys := make([]int, 0, len(listeners))
-		for k := range listeners {
+		keys := make([]PortNumber, 0, len(sockets))
+		for k := range sockets {
 			keys = append(keys, k)
 		}
-		sort.Ints(keys)
+		sort.Slice(keys, func(i, j int) bool {
+			return keys[i] < keys[j]
+		})
 
+		// group matches
 		for _, port := range keys {
-			processes := map[int]*ProcessInfo{}
-			for _, listener := range listeners[port] {
-				pid, ok := inodeToPid[listener.Inode]
-				if !ok {
-					pid = -1
+			if singlePort != 0 && port != PortNumber(singlePort) {
+				continue
+			}
+			owners := map[OwnerId]*OwnerInfo{}
+
+			// we want to group addresses listening on a port by pid (or by user id when pid not available)
+			// note that a process can listen to a port on multiple addresses and more than one process
+			// can listen on a given port or even a (address, port) tuple
+			for _, listener := range sockets[port] {
+				user := username(listener.UID)
+				if singleUser != "" && user != singleUser {
+					continue
 				}
 
-				process := processes[pid]
-				if process == nil {
-					process = &ProcessInfo{
-						User:      username(listener.UID),
-						Cmd:       processName(pid, extended),
-						Addresses: []string{},
+				var owner *OwnerInfo
+				if isRoot() {
+					pid, ok := inodeToPid[listener.Inode]
+					if !ok {
+						// socket could have been created in the small window between making map and scanning sockets
+						fmt.Fprintf(os.Stderr, "Unable to find process for inode %d", listener.Inode)
+						pid = -1
 					}
-					processes[pid] = process
+					if singlePID != -1 && pid != OwnerId(singlePID) {
+						continue
+					}
+
+					if owner = owners[pid]; owner == nil {
+						owner = &OwnerInfo{
+							User:      user,
+							Cmd:       processName(int(pid), extended),
+							Addresses: []string{},
+						}
+						owners[pid] = owner
+					}
+				} else {
+					if owner = owners[OwnerId(listener.UID)]; owner == nil {
+						owner = &OwnerInfo{
+							User:      user,
+							Cmd:       []string{},
+							Addresses: []string{},
+						}
+						owners[OwnerId(listener.UID)] = owner
+					}
 				}
-				process.Addresses = append(process.Addresses, listener.Address)
+				owner.Addresses = append(owner.Addresses, listener.Address)
 			}
 
-			for pid, process := range processes {
-				if (singlePort != 0 && port == singlePort) ||
-					(singleUser != "" && process.User == singleUser) ||
-					(singlePID != -1 && pid == singlePID) ||
-					!(singlePort != 0 || singleUser != "" || singlePID != -1) {
-					line := []string{fmt.Sprintf("%d", port), strings.Join(process.Addresses, ", "), process.User}
-					if isRoot() {
-						line = append(line, fmt.Sprintf("%d", pid), process.Cmd)
-					}
-					lines = append(lines, line)
-					matchResult = 0
+			for ownerId, owner := range owners {
+				listener := Listener{
+					Family:    name,
+					Port:      int(port),
+					Addresses: owner.Addresses,
+					User:      owner.User,
 				}
+				if isRoot() {
+					listener.PID = int(ownerId)
+					listener.Cmd = owner.Cmd
+				}
+				family.Listeners = append(family.Listeners, listener)
 			}
 		}
 
-		// print output
-		if !quiet && len(lines) > 1 {
+		if len(family.Listeners) > 0 {
+			exitCode = 0
+		}
+	}
+
+	if quiet {
+		os.Exit(exitCode)
+	}
+
+	// display results
+	if jsonOutput {
+		fmt.Printf("[")
+		separator := ""
+		for _, name := range []string{"udp", "tcp"} {
+			listeners := families[name].Listeners
+			for _, listener := range listeners {
+				json, err := json.Marshal(listener)
+				if err != nil {
+					panic(err)
+				}
+				fmt.Printf("%s\n  %s", separator, string(json))
+				separator = ","
+			}
+		}
+		fmt.Printf("\n]\n")
+	} else {
+		stanza := 0
+		for _, name := range []string{"udp", "tcp"} {
+			header := []string{strings.ToUpper(name), "ADDR", "USER"}
+			if isRoot() {
+				header = append(header, "PID", "CMD")
+			}
+			lines := [][]string{header}
+
+			for _, listener := range families[name].Listeners {
+				line := []string{fmt.Sprintf("%d", listener.Port), strings.Join(listener.Addresses, ", "), listener.User}
+				if isRoot() {
+					line = append(line, fmt.Sprintf("%d", listener.PID), strings.Join(listener.Cmd, ""))
+				}
+				lines = append(lines, line)
+			}
+
+			// print output
+			if len(lines) <= 1 {
+				continue
+			}
+
 			if stanza > 0 {
 				fmt.Println()
 			}
+			stanza = 1
 
 			// find max width of each column
 			widths := make([]int, len(lines[0]))
@@ -369,11 +454,9 @@ func main() {
 				}
 				fmt.Println()
 			}
-
-			stanza++
 		}
 	}
 
 	// exit success if any matches were found
-	os.Exit(matchResult)
+	os.Exit(exitCode)
 }
