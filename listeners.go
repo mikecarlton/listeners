@@ -416,7 +416,7 @@ func main() {
 			for _, listener := range protocols[name].Listeners {
 				line := []string{fmt.Sprintf("%d", listener.Port), strings.Join(listener.Addresses, ", "), listener.User}
 				if isRoot() {
-					line = append(line, fmt.Sprintf("%d", listener.PID), strings.Join(listener.Cmd, ""))
+					line = append(line, fmt.Sprintf("%d", listener.PID), strings.Join(listener.Cmd, " "))
 				}
 				lines = append(lines, line)
 			}
