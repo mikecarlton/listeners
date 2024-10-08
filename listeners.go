@@ -44,7 +44,7 @@ type Socket struct {
 type OwnerInfo struct {
 	User      string
 	Cmd       []string
-	Addresses []string
+	Addresses map[string]bool
 }
 
 type Listener struct {
@@ -289,10 +289,14 @@ func main() {
 		}
 
 		inputLines := []string{}
-		for _, file := range protocol.Files {
-			data, err := os.ReadFile(file)
+		for _, filename := range protocol.Files {
+			if !exists(filename) { // e.g. if system does not support IPv6
+				continue
+			}
+
+			data, err := os.ReadFile(filename)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Unable to read socket file '%s': %v\n", file, err)
+				fmt.Fprintf(os.Stderr, "Unable to read %s socket file '%s': %v\n", name, filename, err)
 				os.Exit(1)
 			}
 
@@ -324,7 +328,7 @@ func main() {
 
 			// we want to group addresses listening on a port by pid (or by user id when pid not available)
 			// note that a process can listen to a port on multiple addresses and more than one process
-			// can listen on a given port or even a (address, port) tuple
+			// can listen on a given port or even a (address, port) tuple as long as same user
 			for _, listener := range sockets[port] {
 				user := username(listener.UID)
 				if singleUser != "" && user != singleUser {
@@ -347,7 +351,7 @@ func main() {
 						owner = &OwnerInfo{
 							User:      user,
 							Cmd:       processName(int(pid), extended),
-							Addresses: []string{},
+							Addresses: make(map[string]bool),
 						}
 						owners[pid] = owner
 					}
@@ -356,19 +360,26 @@ func main() {
 						owner = &OwnerInfo{
 							User:      user,
 							Cmd:       []string{},
-							Addresses: []string{},
+							Addresses: make(map[string]bool),
 						}
 						owners[OwnerId(listener.UID)] = owner
 					}
 				}
-				owner.Addresses = append(owner.Addresses, listener.Address)
+				owner.Addresses[listener.Address] = true
 			}
 
 			for ownerId, owner := range owners {
+				addresses := make([]string, 0, len(owner.Addresses))
+				for address := range owner.Addresses {
+					addresses = append(addresses, address)
+				}
+				sort.Slice(addresses, func(i, j int) bool {
+					return addresses[i] < addresses[j]
+				})
 				listener := Listener{
 					Protocol:  name,
 					Port:      int(port),
-					Addresses: owner.Addresses,
+					Addresses: addresses,
 					User:      owner.User,
 				}
 				if isRoot() {
