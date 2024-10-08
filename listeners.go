@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [-j] [PORT_NUMBER | USERNAME | @PID]\n"
+	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [-j] [PORT(S) | USERNAME | @PID]\n"
 	UDPv4 = "/proc/net/udp"
 	UDPv6 = "/proc/net/udp6"
 	TCPv4 = "/proc/net/tcp"
@@ -239,9 +239,10 @@ func main() {
 			fmt.Println("    -x: show extended process info (requires root access)")
 			fmt.Println("    -j: JSON output")
 			fmt.Println("    -h: show this help")
-			fmt.Println("    PORT_NUMBER: show only listeners for PORT")
+			fmt.Println("    PORTS: show only listeners for PORTS")
 			fmt.Println("    USERNAME: show only processes owned by USERNAME")
 			fmt.Println("    ^PID: show only listeners owned by process PID (requires root access)")
+			fmt.Println("  PORT(S) is a comma-separated list of ports or port ranges, e.g. '443' or '80,8000-8080'")
 			fmt.Println("  Exits with status 0 (success) if any listeners are found, else exits with status 1")
 			os.Exit(0)
 		default:
