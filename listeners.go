@@ -68,7 +68,7 @@ func collect(entry string, listeners map[PortNumber][]Socket, listenState string
 	if state == listenState {
 		address, portStr, found := strings.Cut(localAddress, ":")
 		if !found {
-			panic(fmt.Sprintf("invalid localAddress: %s", localAddress))
+			panic(fmt.Sprintf("invalid address string: %s", localAddress))
 		}
 
 		var port PortNumber
