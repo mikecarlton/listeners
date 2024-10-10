@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [-j] [PORT(S) | USERNAME | @PID]\n"
+	USAGE = "Usage: %s [-h] [-q] [-x] [-4] [-6] [-u] [-t] [-j] [-H] [PORT(S) | USERNAME | @PID]\n"
 	UDPv4 = "/proc/net/udp"
 	UDPv6 = "/proc/net/udp6"
 	TCPv4 = "/proc/net/tcp"
@@ -118,7 +118,8 @@ func unpackIP(data string) string {
 func mustAtoi(s string) int {
 	i, err := strconv.Atoi(s)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Unable to parse '%s' as an integer: %s", s, err)
+		os.Exit(1)
 	}
 	return i
 }
@@ -192,30 +193,30 @@ func SetField(protocols map[string]*Protocol, name string, field string, value i
 }
 
 func makePortFilter(ports string) *map[PortNumber]bool {
-    portFilter := make(map[PortNumber]bool)
-    for _, portRange := range strings.Split(ports, ",") {
+	portFilter := make(map[PortNumber]bool)
+	for _, portRange := range strings.Split(ports, ",") {
 		startStr, endStr, found := strings.Cut(portRange, "-")
-        start := mustAtoi(startStr)
-        end := start
-        if found {
-            end = mustAtoi(endStr)
-        }
+		start := mustAtoi(startStr)
+		end := start
+		if found {
+			end = mustAtoi(endStr)
+		}
 
-        if start > end {
-            fmt.Fprintf(os.Stderr, "Invalid port range: '%s', start cannot be after end\n", portRange)
-            os.Exit(1)
-        }
-        if start > end || start == 0 || end == 0 || start > 65535 || end > 65535 {
-            fmt.Fprintf(os.Stderr, "Invalid port range: '%s', ports must be in the range 1..65535\n", portRange)
-            os.Exit(1)
-        }
+		if start > end {
+			fmt.Fprintf(os.Stderr, "Invalid port range: '%s', start cannot be after end\n", portRange)
+			os.Exit(1)
+		}
+		if start > end || start == 0 || end == 0 || start > 65535 || end > 65535 {
+			fmt.Fprintf(os.Stderr, "Invalid port range: '%s', ports must be in the range 1..65535\n", portRange)
+			os.Exit(1)
+		}
 
-        for i := start; i <= end; i++ {
-            portFilter[PortNumber(i)] = true
-        }
-    }
+		for i := start; i <= end; i++ {
+			portFilter[PortNumber(i)] = true
+		}
+	}
 
-    return &portFilter
+	return &portFilter
 }
 
 func main() {
@@ -228,6 +229,7 @@ func main() {
 	singleUser := ""
 	singlePID := -1
 	quiet := false
+	suppressHeaders := false
 	extended := false
 	jsonOutput := false
 
@@ -257,6 +259,8 @@ func main() {
 			quiet = true
 		case "-x":
 			extended = true
+		case "-H":
+			suppressHeaders = true
 		case "-h":
 			fmt.Printf(USAGE, os.Args[0])
 			fmt.Println("    -4: show only IPv4 listeners")
@@ -266,6 +270,7 @@ func main() {
 			fmt.Println("    -q: no output, exit status only")
 			fmt.Println("    -x: show extended process info (requires root access)")
 			fmt.Println("    -j: JSON output")
+			fmt.Println("    -H: suppress headers in text output")
 			fmt.Println("    -h: show this help")
 			fmt.Println("    PORT(S): show only listeners for PORT(S)")
 			fmt.Println("    USERNAME: show only processes owned by USERNAME")
@@ -279,7 +284,7 @@ func main() {
 			} else if userRE.MatchString(os.Args[i]) {
 				singleUser = os.Args[i]
 			} else if portsRE.MatchString(os.Args[i]) {
-                portFilter = makePortFilter(os.Args[i])
+				portFilter = makePortFilter(os.Args[i])
 			} else {
 				fmt.Fprintf(os.Stderr, USAGE, os.Args[0])
 				os.Exit(1)
@@ -350,10 +355,10 @@ func main() {
 
 		// group matches
 		for _, port := range keys {
-            if portFilter != nil {
-                if _, ok := (*portFilter)[port]; !ok {
-                    continue
-                }
+			if portFilter != nil {
+				if _, ok := (*portFilter)[port]; !ok {
+					continue
+				}
 			}
 
 			owners := map[OwnerId]*OwnerInfo{}
@@ -450,11 +455,14 @@ func main() {
 	} else {
 		stanza := 0
 		for _, name := range []string{"udp", "tcp"} {
-			header := []string{strings.ToUpper(name), "ADDR", "USER"}
-			if isRoot() {
-				header = append(header, "PID", "CMD")
+			lines := [][]string{}
+			if !suppressHeaders {
+				header := []string{strings.ToUpper(name), "ADDR", "USER"}
+				if isRoot() {
+					header = append(header, "PID", "CMD")
+				}
+				lines = [][]string{header}
 			}
-			lines := [][]string{header}
 
 			for _, listener := range protocols[name].Listeners {
 				line := []string{fmt.Sprintf("%d", listener.Port), strings.Join(listener.Addresses, ", "), listener.User}
