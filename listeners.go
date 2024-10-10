@@ -191,13 +191,40 @@ func SetField(protocols map[string]*Protocol, name string, field string, value i
 	protocols[name] = protocol
 }
 
+func makePortFilter(ports string) *map[PortNumber]bool {
+    portFilter := make(map[PortNumber]bool)
+    for _, portRange := range strings.Split(ports, ",") {
+		startStr, endStr, found := strings.Cut(portRange, "-")
+        start := mustAtoi(startStr)
+        end := start
+        if found {
+            end = mustAtoi(endStr)
+        }
+
+        if start > end {
+            fmt.Fprintf(os.Stderr, "Invalid port range: '%s', start cannot be after end\n", portRange)
+            os.Exit(1)
+        }
+        if start > end || start == 0 || end == 0 || start > 65535 || end > 65535 {
+            fmt.Fprintf(os.Stderr, "Invalid port range: '%s', ports must be in the range 1..65535\n", portRange)
+            os.Exit(1)
+        }
+
+        for i := start; i <= end; i++ {
+            portFilter[PortNumber(i)] = true
+        }
+    }
+
+    return &portFilter
+}
+
 func main() {
 	protocols := map[string]*Protocol{
 		"udp": {Files: []string{UDPv4, UDPv6}, ListenState: "07", Enabled: true},
 		"tcp": {Files: []string{TCPv4, TCPv6}, ListenState: "0A", Enabled: true},
 	}
 
-	singlePort := 0 // 0 is reserved in UDP and TCP
+	var portFilter *map[PortNumber]bool
 	singleUser := ""
 	singlePID := -1
 	quiet := false
@@ -208,6 +235,7 @@ func main() {
 	procRE := regexp.MustCompile(`^/proc/(\d+)/`)
 	userRE := regexp.MustCompile(`^[a-z][-a-z]*$`)
 	pidRE := regexp.MustCompile(`^@\d+$`)
+	portsRE := regexp.MustCompile(`^\d+(-\d+)?(,\d+(-\d+)?)*$`)
 
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -239,7 +267,7 @@ func main() {
 			fmt.Println("    -x: show extended process info (requires root access)")
 			fmt.Println("    -j: JSON output")
 			fmt.Println("    -h: show this help")
-			fmt.Println("    PORTS: show only listeners for PORTS")
+			fmt.Println("    PORT(S): show only listeners for PORT(S)")
 			fmt.Println("    USERNAME: show only processes owned by USERNAME")
 			fmt.Println("    ^PID: show only listeners owned by process PID (requires root access)")
 			fmt.Println("  PORT(S) is a comma-separated list of ports or port ranges, e.g. '443' or '80,8000-8080'")
@@ -250,8 +278,8 @@ func main() {
 				singlePID = mustAtoi(os.Args[i][1:])
 			} else if userRE.MatchString(os.Args[i]) {
 				singleUser = os.Args[i]
-			} else if port, err := strconv.Atoi(os.Args[i]); err == nil {
-				singlePort = port
+			} else if portsRE.MatchString(os.Args[i]) {
+                portFilter = makePortFilter(os.Args[i])
 			} else {
 				fmt.Fprintf(os.Stderr, USAGE, os.Args[0])
 				os.Exit(1)
@@ -322,9 +350,12 @@ func main() {
 
 		// group matches
 		for _, port := range keys {
-			if singlePort != 0 && port != PortNumber(singlePort) {
-				continue
+            if portFilter != nil {
+                if _, ok := (*portFilter)[port]; !ok {
+                    continue
+                }
 			}
+
 			owners := map[OwnerId]*OwnerInfo{}
 
 			// we want to group addresses listening on a port by pid (or by user id when pid not available)
