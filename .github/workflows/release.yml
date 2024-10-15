@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger the workflow only on tag pushes with a 'v' prefix (e.g., v1.0.0)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]  # Build for both amd64 and arm64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+
+    - name: Build
+      run: |
+        CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o listeners-${{ matrix.goos }}-${{ matrix.goarch }} -ldflags "-w -s"
+
+    - name: Create Release
+      id: create_release
+      if: matrix.goarch == 'amd64'  # Create the release only once
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name }}  # The tag that triggered this release
+        release_name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./listeners-${{ matrix.goos }}-${{ matrix.goarch }}
+        asset_name: listeners-${{ matrix.goos }}-${{ matrix.goarch }}
+        asset_content_type: application/octet-stream
